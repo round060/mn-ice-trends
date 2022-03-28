@@ -1,0 +1,296 @@
+---
+title: "raw-data"
+author: "Christopher Rounds"
+date: "2/9/2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+#remotes::install_github("mnsentinellakes/mnsentinellakes") 
+# will install alot of packages
+library(mnsentinellakes)
+library(tidyverse)
+library(ggplot2)
+library(sf)
+library(sp)
+
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(echo = TRUE,
+                     root.dir = rprojroot::find_rstudio_root_file())
+
+ice_in <- read.csv("./data/uncleaned/lake_ice_in_all_2020.csv")
+ice_out <- read.csv("./data/uncleaned/lake_ice_out_all_2021.csv")
+
+
+#format ENSO NOAA data (https://psl.noaa.gov/data/climateindices/)
+old_enso <- read.table("./data/uncleaned/old_enso.txt") # has enso data pre 1948 (starts in 1872) 
+colnames(old_enso) <- c("year", paste(1:12))
+
+new_enso <- read.table("./data/uncleaned/enso.txt") # starts in 1948
+colnames(new_enso) <- c("year", "index")
+new_enso$month <- round((new_enso$year %% 1)*12) + 1
+new_enso$year <- floor(new_enso$year)
+new_enso <- new_enso %>% pivot_wider(names_from = "month", values_from = "index")
+
+enso <- rbind(old_enso %>% filter(year < 1948), new_enso)
+
+
+```
+
+
+
+
+```{r ice}
+ice_in <- ice_in %>%
+  dplyr::select(date, lake.id) %>%
+  rename(DOW = lake.id, date_in = date) %>%
+  mutate(DOW = fixlakeid(DOW),
+         date_in = as.Date(date_in, "%m/%d/%Y"),
+         jd_in = as.numeric(format(date_in, "%j")),
+         year_in = as.numeric(format(date_in, "%Y")),
+         winter_year = ifelse(jd_in > 270, year_in, year_in - 1)) %>%
+  dplyr::distinct(DOW, winter_year, .keep_all = TRUE)
+
+ice_out <- ice_out %>%
+  dplyr::select(date, lake.id) %>%
+  rename(DOW = lake.id, date_out = date) %>%
+  mutate(DOW = fixlakeid(DOW),
+         date_out = as.Date(date_out, "%m/%d/%Y"),
+         jd_out = as.numeric(format(date_out, "%j")),
+         year_out = as.numeric(format(date_out, "%Y")),
+         winter_year = year_out - 1) %>%
+  dplyr::distinct(DOW, winter_year, .keep_all = TRUE)
+
+ice_data <- inner_join(ice_in, ice_out, by = c("DOW", "winter_year")) %>%
+  mutate(duration = jd_out + (365 - jd_in))
+
+leap_year <- seq(1860, 2022, by = 4)
+ice_data$duration = NA
+for (i in 1:nrow(ice_data)) {
+  if (ice_data[i, "jd_in"] < 270) {
+    ice_data[i, "duration"] = ice_data[i, "jd_out"] - ice_data[i, "jd_in"]
+  } #end if
+  else{
+    ice_data[i, "duration"] = ice_data[i, "jd_out"] + (365 - ice_data[i, "jd_in"])
+  } #end else
+  if (ice_data[i, "year_in"] %in% leap_year) {
+    ice_data[i, "duration"] = 1 + ice_data[i, "duration"]
+  }
+}
+
+#write.csv(ice_out, file = "./data/cleaned/ice_out.csv", row.names = FALSE)
+#write.csv(ice_in, file = "./data/cleaned/ice_in.csv", row.names = FALSE)
+#write.csv(ice_data, file = "./data/cleaned/ice_duration.csv", row.names = FALSE)
+
+```
+We have `r length(unique(ice_in$DOW))` lakes with ice in dates. More lakes have ice out dates with a total of `r length(unique(ice_out$DOW))` lakes. Obviously you need ice-on dates and ice-off dates to get duration so we have the fewest duration measurements (with a total of `r length(unique(ice_data$DOW))` different lakes)
+
+```{r spatialdata}
+MN.shape <-  readRDS("./data/uncleaned/mndow_lakes_sf_allDataUntransformed.rds")
+spatial_cov <- read.csv("./data/uncleaned/SPATIAL_COVARIATES.csv")
+# Reproject
+
+st_crs(MN.shape) <- sf::st_crs(MN.shape)
+MN.shape <- MN.shape %>% st_transform(x, crs = 4326)
+
+all_dows <- unique(c(ice_in$DOW, ice_out$DOW))
+MN.shape <- MN.shape %>% filter(dowlknum %in% all_dows)
+
+
+#converts the UTM that was used in the OG file to lat long because I like lat long
+utm <- data.frame(MN.shape$center_utm, MN.shape$center_u_1)
+sputm <- SpatialPoints(utm, proj4string = CRS("+proj=utm +zone=15 +datum=WGS84"))  
+spgeo <- spTransform(sputm, CRS("+proj=longlat +datum=WGS84"))
+latlong <- as.data.frame(spgeo)
+long <- latlong$center
+lat <- latlong$other
+
+match_lakes <- MN.shape %>% 
+  select(dowlknum, acres, shore_mi, pw_basin_n) %>%
+  mutate( long = latlong$MN.shape.center_utm,
+          lat = latlong$MN.shape.center_u_1) %>%
+  rename(DOW = dowlknum)
+
+spatial_cov$DOW <- fixlakeid(spatial_cov$DOW)
+spatial_cov <- spatial_cov %>% filter(DOW %in% match_lakes$DOW) %>%
+  select(DOW, DOW_CDOM, DOW_CDOM_Ecoregion)
+
+spatial_data <- merge(spatial_cov, match_lakes, by = "DOW", all = "TRUE") %>%
+  subset(select = -(geometry)) %>% #removes sp object geometry may want to keep if we plot?
+  arrange(pw_basin_n) %>%
+  dplyr::filter(!grepl('(Canada)', pw_basin_n)) %>% #removes border waters
+  distinct(DOW, .keep_all = TRUE) #removes double listed ids (ex. lake pepin)
+
+
+
+ice_out_spatial <- inner_join(ice_out, spatial_data, by = "DOW")
+for (i in 1:nrow(ice_out_spatial)) {
+  # Year out averages
+  if (ice_out_spatial$year_out[i] %in% enso$year) 
+    ice_out_spatial$ENSO[i] <- rowMeans(enso[enso$year == ice_out_spatial$year_out[i], 2:13])
+  if (ice_out_spatial$year_out[i] %in% enso$year & ice_out_spatial$winter_year[i] %in% enso$year)
+    ice_out_spatial$ENSOw[i] <- rowMeans(cbind(enso[enso$year == ice_out_spatial$winter_year[i], 11:13],
+                                           enso[enso$year == ice_out_spatial$year_out[i], 2:6]))
+}
+#write.csv(ice_out_spatial, file = "./data/cleaned/ice_out_spatial.csv", row.names = FALSE)
+
+
+duration_spatial <- inner_join(ice_data, spatial_data, by = "DOW")
+for (i in 1:nrow(duration_spatial)) {
+  # Year out averages
+  if (duration_spatial$year_out[i] %in% enso$year) 
+    duration_spatial$ENSO[i] <- rowMeans(enso[enso$year == duration_spatial$year_out[i], 2:13])
+  if (duration_spatial$year_out[i] %in% enso$year & duration_spatial$winter_year[i] %in% enso$year)
+    duration_spatial$ENSOw[i] <- rowMeans(cbind(enso[enso$year == duration_spatial$winter_year[i], 11:13],
+                                           enso[enso$year == duration_spatial$year_out[i], 2:6]))
+}
+#write.csv(duration_spatial, file = "./data/cleaned/duration_spatial.csv", row.names = FALSE)
+
+
+ice_in_spatial <- inner_join(ice_in, spatial_data, by = "DOW")
+for (i in 1:nrow(ice_in_spatial)) {
+  # Year out averages
+  if (ice_in_spatial$year_in[i] %in% enso$year) 
+    ice_in_spatial$ENSO[i] <- rowMeans(enso[enso$year == ice_in_spatial$year_in[i], 2:13])
+}
+#write.csv(ice_in_spatial, file = "./data/cleaned/ice_in_spatial.csv", row.names = FALSE)
+```
+  
+I wrote out csv files for ice in, ice out and ice duration twice. Why you might ask? The join of ice data with spatial covariates ends up dropping a couple of lakes because we don't have spatial information for every lake. For example, ice duration is recorded on   `r length(unique(ice_data$DOW))` lakes in total but after the join with spatial data we only have `r length(unique(duration_spatial$DOW))` unique lakes. I want to include as many lakes as possible for the visualization purposes but want only complete cases for modeling purposes.
+
+
+```{r pressure}
+observations <- ice_data %>%
+  group_by(DOW) %>%
+  count() %>%
+  dplyr::filter(n >= 5)
+
+ten_years_ice <- ice_data %>% 
+  filter(DOW %in% observations$DOW) 
+
+ten_years_ice %>%
+  dplyr::filter(winter_year > 1910) %>%
+  ggplot(aes(x = winter_year, y = duration)) +
+  geom_point() +
+  geom_smooth(method = 'gam' , formula = y ~s(x, k = 20), se = FALSE) +
+  theme(legend.position = "none")
+
+ten_years_ice %>%
+  dplyr::filter(winter_year > 1910) %>%
+  ggplot(aes(x = winter_year, y = duration)) +
+  geom_point() +
+  geom_smooth(method = 'lm', se = FALSE) +
+  theme(legend.position = "none")
+
+```
+
+
+```{r select_lakes}
+#easy function to plot specific lakes
+plot_lake <- function(input_DOW){
+  ice_data %>%
+    dplyr::filter(DOW == input_DOW) %>%
+    ggplot(aes(x = winter_year, y = duration)) +
+    geom_point() +
+    geom_smooth(method = 'lm', se = TRUE) +
+    theme(legend.position = "none")
+}
+
+plot_lake("31055400")
+```
+
+
+
+
+```{r pull_temps}
+'
+# really should only run this the first time, these files take a long time to download/parse
+#Bias Corrected Spatially Downscaled Monthly CMIP5 Climate Projections
+#https://gdo-dcp.ucllnl.org/downscaled_cmip_projections/
+#http://forecast.bcccsm.ncc-cma.net/web/channel-43.html
+
+
+
+#this is the data I used https://cida.usgs.gov/thredds/catalog.html?dataset=cida.usgs.gov/loca_future
+#good tutorial on what im doing
+#https://waterdata.usgs.gov/blog/locadownscaling 
+library(geoknife)
+
+
+
+
+stencil <- webgeom("state::Minnesota")
+
+#for each scenario (rcp) we want max and min temperature, two downloads for past four downloads for future.
+
+fabric_future <- webdata(url = "http://cida.usgs.gov/thredds/dodsC/loca_future")
+varList <- query(fabric_future,"variables")
+
+
+fabric_future_max_4.5 <- webdata(url = "http://cida.usgs.gov/thredds/dodsC/loca_future", 
+                         variables = "tasmax_ACCESS1-0_r1i1p1_rcp45")
+fabric_future_min_4.5 <- webdata(url = "http://cida.usgs.gov/thredds/dodsC/loca_future", 
+                         variables = "tasmin_ACCESS1-0_r1i1p1_rcp45")
+times(fabric_future_max_4.5) <- c("2006-01-01", "2101-01-01")
+job_max_4.5 <- geoknife(stencil, fabric_future_max_4.5, wait = TRUE)
+data_max_4.5 <- result(job_max_4.5)
+
+times(fabric_future_min_4.5) <- c("2006-01-01", "2101-01-01")
+job_min_4.5 <- geoknife(stencil, fabric_future_min_4.5, wait = TRUE)
+data_min_4.5 <- result(job_min_4.5)
+future_4.5 <- rbind(data_max_4.5, data_min_4.5)
+write.csv(future_4.5, file = "./data/uncleaned/future_temps_4.5.csv", row.names = FALSE)
+
+
+fabric_future_max_8.5 <- webdata(url = "http://cida.usgs.gov/thredds/dodsC/loca_future", 
+                                 variables = "tasmax_ACCESS1-0_r1i1p1_rcp85")
+times(fabric_future_max_8.5) <- c("2006-01-01", "2101-01-01")
+job_max_8.5 <- geoknife(stencil, fabric_future_max_8.5, wait = TRUE)
+data_max_8.5 <- result(job_max_8.5)
+
+
+fabric_future_min_8.5 <- webdata(url = "http://cida.usgs.gov/thredds/dodsC/loca_future", 
+                                 variables = "tasmin_ACCESS1-0_r1i1p1_rcp85")
+times(fabric_future_min_8.5) <- c("2006-01-01", "2101-01-01")
+job_min_8.5 <- geoknife(stencil, fabric_future_min_8.5, wait = TRUE)
+data_min_8.5 <- result(job_min_8.5)
+
+future_8.5 <- rbind(data_max_8.5, data_min_8.5)
+write.csv(future_8.5, file = "./data/uncleaned/future_temps_8.5.csv", row.names = FALSE)
+
+
+fabric_hist_max <- webdata(url = "http://cida.usgs.gov/thredds/dodsC/loca_historical", 
+                           variables = "tasmax_ACCESS1-0_r1i1p1_historical")
+times(fabric_hist_max) <- c("1950-01-01", "2006-01-01")
+job <- geoknife(stencil, fabric_hist_max, wait = TRUE)
+data <- result(job)
+
+fabric_hist_min <- webdata(url = "http://cida.usgs.gov/thredds/dodsC/loca_historical", 
+                           variables = "tasmin_ACCESS1-0_r1i1p1_historical")
+times(fabric_hist_min) <- c("1950-01-01", "2006-01-01")
+job <- geoknife(stencil, fabric_hist_min, wait = TRUE)
+data_min <- result(job)
+
+historical <- rbind(data, data_min)
+write.csv(historical, file = "./data/uncleaned/historical_air_temps.csv", row.names = FALSE)
+'
+```
+
+
+```{r climate}
+# Change climate data into suitable for modelling purposes, probably best to use winter temps?
+# but could have winter temps (oct-may) as a predictor and also winter (oct-jan) and spring (march-may)
+# as predictors
+
+future_8.5 <- read.csv("./data/uncleaned/future_temps_8.5.csv")
+future_8.5 <- future_8.5 %>%
+  ungroup() %>%
+  pivot_wider(names_from = variable, values_from = Minnesota) %>%
+  rename("max_temp" = "tasmax_ACCESS1-0_r1i1p1_rcp85",
+         "min_temp" = "tasmin_ACCESS1-0_r1i1p1_rcp85") %>%
+  mutate(mean_temp = rowMeans(select(., c("max_temp", "min_temp")))) %>%
+  mutate(mean_temp = mean_temp - 273.15) %>%
+  select(DateTime, mean_temp)
+
+```
+
