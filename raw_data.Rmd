@@ -201,7 +201,7 @@ plot_lake("31055400")
 
 
 
-
+# save yourself the headache and dont uncomment this code!
 ```{r pull_temps}
 '
 # really should only run this the first time, these files take a long time to download/parse
