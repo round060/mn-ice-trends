@@ -34,6 +34,35 @@ new_enso <- new_enso %>% pivot_wider(names_from = "month", values_from = "index"
 
 enso <- rbind(old_enso %>% filter(year < 1948), new_enso)
 
+#from NOAA and climate service
+#(https://spaceweather.gc.ca/forecast-prevision/solar-solaire/solarflux/sx-5-en.php)
+#NOAA data is from 1948 - 2019
+# climate service data is from 2005 - 2022
+
+solar_flux <- read.table("./data/uncleaned/solar_flux_noaa.txt")
+colnames(solar_flux) <- c("year", "index")
+solar_flux$month <- round((solar_flux$year %% 1)*12) + 1
+solar_flux$year <- floor(solar_flux$year)
+solar_flux <- solar_flux %>% 
+  pivot_wider(names_from = "month", values_from = "index") %>%
+  dplyr::filter(year < 2019)
+  
+new_solar_flux <- read.table("./data/uncleaned/solflux_monthly_average.txt")
+colnames(new_solar_flux) <- c("year", "month", "index", "adjindex", "absflux")
+new_solar_flux <- new_solar_flux %>% 
+  dplyr::filter(year > 2018) %>% 
+  select(year, month, index) %>%
+  mutate(index = index * 10) %>%
+  pivot_wider(names_from = "month", values_from = "index")
+
+solar_flux <- rbind(solar_flux, new_solar_flux)
+
+#Quasi Biennial Oscillation (https://psl.noaa.gov/data/climateindices/)
+qbo <- read.table("./data/uncleaned/QBO.txt")
+colnames(qbo) <- c("year", "index")
+qbo$month <- round((qbo$year %% 1)*12) + 1
+qbo$year <- floor(qbo$year)
+qbo <- qbo %>% pivot_wider(names_from = "month", values_from = "index")
 
 ```
 
@@ -102,14 +131,17 @@ utm <- data.frame(MN.shape$center_utm, MN.shape$center_u_1)
 sputm <- SpatialPoints(utm, proj4string = CRS("+proj=utm +zone=15 +datum=WGS84"))  
 spgeo <- spTransform(sputm, CRS("+proj=longlat +datum=WGS84"))
 latlong <- as.data.frame(spgeo)
-long <- latlong$center
-lat <- latlong$other
+
 
 match_lakes <- MN.shape %>% 
   select(dowlknum, acres, shore_mi, pw_basin_n) %>%
   mutate( long = latlong$MN.shape.center_utm,
           lat = latlong$MN.shape.center_u_1) %>%
   rename(DOW = dowlknum)
+
+# for some reason Gull lake (DOW = 11030500) has lat/longs that are deep in Canada, fixed manually
+match_lakes$long[match_lakes$DOW == 11030500] = -94.331989
+match_lakes$lat[match_lakes$DOW == 11030500] = 46.452864
 
 spatial_cov$DOW <- fixlakeid(spatial_cov$DOW)
 spatial_cov <- spatial_cov %>% filter(DOW %in% match_lakes$DOW) %>%
@@ -121,37 +153,141 @@ spatial_data <- merge(spatial_cov, match_lakes, by = "DOW", all = "TRUE") %>%
   dplyr::filter(!grepl('(Canada)', pw_basin_n)) %>% #removes border waters
   distinct(DOW, .keep_all = TRUE) #removes double listed ids (ex. lake pepin)
 
+rm(utm);rm(sputm);rm(spgeo);rm(MN.shape);rm(match_lakes)
+```
+
+```{r depthdata}
+#depth data from https://gisdata.mn.gov/dataset/water-lake-bathymetry
+depth_data <- readRDS("./data/uncleaned/MN_bathy.rds")
+
+depth_data <- depth_data %>%
+  filter(DOW %in% spatial_data$DOW)
+
+maxdepth_lake <- data.frame("DOW" = character(1), "max_depth" = numeric(1), 
+                            stringsAsFactors = FALSE)
+
+# Extract max_depth from every lake that ice data exists for 
+max_depth = depth_data[1,1]; DOW = depth_data[1,3]; i = 1
+for (row in 1:nrow(depth_data)) {
+  if (DOW != depth_data[row,3]) {
+    maxdepth_lake[i,1] = DOW
+    maxdepth_lake[i,2] = max_depth
+    i = i + 1
+    DOW = depth_data[row,3]
+    max_depth = depth_data[row,3]
+  }
+  else {
+    max_depth = depth_data[row, 1]
+  }
+}
+maxdepth_lake[i,1] = DOW; maxdepth_lake[i,2] = max_depth
+#77014901 and 77014900 need to be combined
+#03038700 03038701
+manual_maxdepth <- data.frame("DOW" = c("04013000", "43004000", "86013400", "27011900", "56033500", 
+                                        "19002100", "56063900", "38024200", "27001400", "29020800",
+                                        "69037800", "27065500", "29001500", "11035600", "16062900",
+                                        "31053600", "34003200", "10009500", "69129500","11020100", 
+                                        "16013900", "31043800", "80003700", "1009300","18032300", 
+                                        "69129400", "56024300", "77015400", "31021400","31037200", 
+                                        "18023900", "18007000", "31057100", "52000100", "03038702"), 
+                              "max_depth" = c(76, 10, 56, 7, 81, 37, 24, 24, 39, 76, 16, 34, 29, 145, 
+                                              40, 26, 35, 12, 64, 54, 130, 58, 22, 24, 46, 286, 62, 37, 16,
+                                              53, 23, 88, 69, 35, 32), 
+                            stringsAsFactors = FALSE)
+manual_maxdepth$max_depth = manual_maxdepth$max_depth/3.281
+
+# add max_depth to the spatial_data frame to merge with ice data later
+spatial_data <- merge(spatial_data, maxdepth_lake, by = "DOW", all = "TRUE") %>%
+  mutate(max_depth = as.numeric(max_depth))
+
+for (i in 1:nrow(spatial_data)) {
+  if (spatial_data[i,]$DOW %in% manual_maxdepth$DOW) {
+    depth = manual_maxdepth[which(manual_maxdepth$DOW == spatial_data[i,]$DOW), 2]
+    spatial_data[i,]$max_depth = depth
+  }
+}
+
+```
 
 
+```{r combine}
 ice_out_spatial <- inner_join(ice_out, spatial_data, by = "DOW")
+
+ice_out_spatial$ENSO <- NA
+ice_out_spatial$QBO <- NA
+ice_out_spatial$SUN <- NA
+ice_out_spatial$ENSOw <- NA
+ice_out_spatial$QBOw <- NA
+ice_out_spatial$SUNw <- NA
+
 for (i in 1:nrow(ice_out_spatial)) {
   # Year out averages
   if (ice_out_spatial$year_out[i] %in% enso$year) 
     ice_out_spatial$ENSO[i] <- rowMeans(enso[enso$year == ice_out_spatial$year_out[i], 2:13])
+  if (ice_out_spatial$year_out[i] %in% qbo$year) 
+    ice_out_spatial$QBO[i] <- rowMeans(qbo[qbo$year == ice_out_spatial$year_out[i], 2:13])
+  if (ice_out_spatial$year_out[i] %in% solar_flux$year)
+    ice_out_spatial$SUN[i] <- rowMeans(solar_flux[solar_flux$year == ice_out_spatial$year_out[i], 2:13])
+  
+  # Oct-May averages: winter.year=months 1-5 (cols 2-6), fall.year=months 10-12 (cols 11-13)
   if (ice_out_spatial$year_out[i] %in% enso$year & ice_out_spatial$winter_year[i] %in% enso$year)
     ice_out_spatial$ENSOw[i] <- rowMeans(cbind(enso[enso$year == ice_out_spatial$winter_year[i], 11:13],
                                            enso[enso$year == ice_out_spatial$year_out[i], 2:6]))
+  if (ice_out_spatial$year_out[i] %in% qbo$year & ice_out_spatial$winter_year[i] %in% qbo$year)
+    ice_out_spatial$QBOw[i] <- rowMeans(cbind(qbo[qbo$year == ice_out_spatial$winter_year[i], 11:13], 
+                                             qbo[qbo$year == ice_out_spatial$year_out[i], 2:6]))
+  if (ice_out_spatial$year_out[i] %in% solar_flux$year & ice_out_spatial$winter_year[i] %in% solar_flux$year)
+    ice_out_spatial$SUNw[i] <- rowMeans(cbind(solar_flux[solar_flux$year == ice_out_spatial$winter_year[i], 11:13], 
+                                             solar_flux[solar_flux$year == ice_out_spatial$year_out[i], 2:6]))
 }
 #write.csv(ice_out_spatial, file = "./data/cleaned/ice_out_spatial.csv", row.names = FALSE)
 
 
 duration_spatial <- inner_join(ice_data, spatial_data, by = "DOW")
+
+duration_spatial$ENSO <- NA
+duration_spatial$QBO <- NA
+duration_spatial$SUN <- NA
+duration_spatial$ENSOw <- NA
+duration_spatial$QBOw <- NA
+duration_spatial$SUNw <- NA
 for (i in 1:nrow(duration_spatial)) {
   # Year out averages
   if (duration_spatial$year_out[i] %in% enso$year) 
     duration_spatial$ENSO[i] <- rowMeans(enso[enso$year == duration_spatial$year_out[i], 2:13])
+  if (duration_spatial$year_out[i] %in% qbo$year) 
+    duration_spatial$QBO[i] <- rowMeans(qbo[qbo$year == duration_spatial$year_out[i], 2:13])
+  if (duration_spatial$year_out[i] %in% solar_flux$year)
+    duration_spatial$SUN[i] <- rowMeans(solar_flux[solar_flux$year == duration_spatial$year_out[i], 2:13])
+  
+  # Oct-May averages: winter.year=months 1-5 (cols 2-6), fall.year=months 10-12 (cols 11-13)
   if (duration_spatial$year_out[i] %in% enso$year & duration_spatial$winter_year[i] %in% enso$year)
     duration_spatial$ENSOw[i] <- rowMeans(cbind(enso[enso$year == duration_spatial$winter_year[i], 11:13],
                                            enso[enso$year == duration_spatial$year_out[i], 2:6]))
+  if (duration_spatial$year_out[i] %in% qbo$year & duration_spatial$winter_year[i] %in% qbo$year)
+    duration_spatial$QBOw[i] <- rowMeans(cbind(qbo[qbo$year == duration_spatial$winter_year[i], 11:13], 
+                                             qbo[qbo$year == duration_spatial$year_out[i], 2:6]))
+  if (duration_spatial$year_out[i] %in% solar_flux$year & duration_spatial$winter_year[i] %in% solar_flux$year)
+    duration_spatial$SUNw[i] <- rowMeans(cbind(solar_flux[solar_flux$year == duration_spatial$winter_year[i], 11:13], 
+                                             solar_flux[solar_flux$year == duration_spatial$year_out[i], 2:6]))
 }
 #write.csv(duration_spatial, file = "./data/cleaned/duration_spatial.csv", row.names = FALSE)
 
 
 ice_in_spatial <- inner_join(ice_in, spatial_data, by = "DOW")
+
+ice_in_spatial$ENSO <- NA
+ice_in_spatial$QBO <- NA
+ice_in_spatial$SUN <- NA
+
 for (i in 1:nrow(ice_in_spatial)) {
-  # Year out averages
+    # Year out averages
   if (ice_in_spatial$year_in[i] %in% enso$year) 
     ice_in_spatial$ENSO[i] <- rowMeans(enso[enso$year == ice_in_spatial$year_in[i], 2:13])
+  if (ice_in_spatial$year_in[i] %in% qbo$year) 
+    ice_in_spatial$QBO[i] <- rowMeans(qbo[qbo$year == ice_in_spatial$year_in[i], 2:13])
+  if (ice_in_spatial$year_in[i] %in% solar_flux$year)
+    ice_in_spatial$SUN[i] <- rowMeans(solar_flux[solar_flux$year == ice_in_spatial$year_in[i], 2:13])
 }
 #write.csv(ice_in_spatial, file = "./data/cleaned/ice_in_spatial.csv", row.names = FALSE)
 ```
@@ -182,21 +318,6 @@ ten_years_ice %>%
   geom_smooth(method = 'lm', se = FALSE) +
   theme(legend.position = "none")
 
-```
-
-
-```{r select_lakes}
-#easy function to plot specific lakes
-plot_lake <- function(input_DOW){
-  ice_data %>%
-    dplyr::filter(DOW == input_DOW) %>%
-    ggplot(aes(x = winter_year, y = duration)) +
-    geom_point() +
-    geom_smooth(method = 'lm', se = TRUE) +
-    theme(legend.position = "none")
-}
-
-plot_lake("31055400")
 ```
 
 
