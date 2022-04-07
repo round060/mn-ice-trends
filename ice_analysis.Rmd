@@ -6,6 +6,7 @@ output: html_document
 ---
 
 ```{r setup, include=FALSE}
+library(mnsentinellakes)
 library(lme4)
 library(MuMIn)
 library(effects)
@@ -14,89 +15,246 @@ library(gratia)
 library(gamm4)
 library(itsadug)
 library(tidyverse)
+library(plotly)
 
 
 duration_spatial <- read.csv("./data/cleaned/duration_spatial.csv")
 icein_spatial <- read.csv("./data/cleaned/ice_in_spatial.csv")
 iceout_spatial <- read.csv("./data/cleaned/ice_out_spatial.csv")
 
+ice_data <- read.csv("./data/cleaned/ice_duration.csv")
+ice_data <- ice_data %>% mutate(DOW = fixlakeid(DOW))
+options(digits = 7)
 
 ```
 
 
-```{r duration}
-observations <- duration_spatial %>%
+```{r observations}
+# Check how many observations we lose by imposing different requirements for duration
+# if we only include observations later than 1947 and lakes with at least 10 observations 
+# we have 213 lakes and 4862 ice duration observations (we lose about 3300 ice observations)
+# For ice out we have 495 lakes with 12610 observations (we lose 5000 ice observations)
+# for ice in we 265 lakes with 5846 observations (we lose about 4000 ice observations)
+
+### select lakes with duration
+observations_dur <- duration_spatial %>%
+  filter(year_in > 1947) %>%
   group_by(DOW) %>%
   count() %>%
-  dplyr::filter(n >= 5)
+  dplyr::filter(n >= 10)
+  
+length(unique(observations_dur$DOW))
+sum(observations_dur$n)
 
-length(unique(observations$DOW))
-sum(observations$n)
+duration_model_df <- duration_spatial %>%
+  filter(DOW %in% observations_dur$DOW) %>%
+  filter(year_in > 1947) %>%
+  mutate(DOW = as.factor(DOW),
+         log_acres = log(acres),
+         US_L3NAME = as.factor(US_L3NAME),
+         US_L4NAME = as.factor(US_L4NAME))
 
-observations <- duration_spatial %>%
-  filter(year_in > 1948) %>%
+
+### select lakes with ice in
+observations_in <- icein_spatial %>%
+  filter(year_in > 1947) %>%
   group_by(DOW) %>%
   count() %>%
-  dplyr::filter(n >= 5)
+  dplyr::filter(n >= 10)
+  
+length(unique(observations_in$DOW))
+sum(observations_in$n)
 
-length(unique(observations$DOW))
-sum(observations$n)
+icein_model_df <- icein_spatial %>%
+  filter(DOW %in% observations_in$DOW) %>%
+  filter(year_in > 1947) %>%
+  mutate(DOW = as.factor(DOW),
+         log_acres = log(acres),
+         US_L3NAME = as.factor(US_L3NAME),
+         US_L4NAME = as.factor(US_L4NAME))
 
-observations <- duration_spatial %>%
-  filter(year_in > 1948) %>%
-  subset(!is.na(max_depth)) %>%
+
+### select lakes with ice out
+observations_out <- iceout_spatial %>%
+  filter(year_out > 1948) %>%
   group_by(DOW) %>%
   count() %>%
-  dplyr::filter(n >= 3)
+  dplyr::filter(n >= 10)
+  
+length(unique(observations_out$DOW))
+sum(observations_out$n)
 
-length(unique(observations$DOW))
-sum(observations$n)
+iceout_model_df <- iceout_spatial %>%
+  filter(DOW %in% observations_out$DOW) %>%
+  filter(year_out > 1948) %>%
+  mutate(DOW = as.factor(DOW),
+         log_acres = log(acres),
+         US_L3NAME = as.factor(US_L3NAME),
+         US_L4NAME = as.factor(US_L4NAME))
+remove(observations_out); remove(observations_in); remove(observations_dur)
+```
+
+```{r histo}
+# histograms of how many observations we have in the data set per lake
+duration_spatial %>%
+  group_by(DOW) %>%
+  count() %>%
+  filter(n >= 10) %>%
+  ggplot() +
+  geom_bar(aes(x = n), color = "red3",fill = "darksalmon") +
+  xlab("Lakes with this many Ice On Observations") +
+  ylab("Number of Lakes") + 
+  labs(title = "Lakes with Ice Duration Records", subtitle = "213 Lakes With 10+ Years of Data")
+
+icein_spatial %>%
+  group_by(DOW) %>%
+  count() %>%
+  filter(n >= 10) %>%
+  ggplot() +
+  geom_bar(aes(x = n), color = "red3",fill = "darksalmon") +
+  xlab("Lakes with this many Ice On Observations") +
+  ylab("Number of Lakes") + 
+  labs(title = "Lakes with Ice-in Records", subtitle = "265 Lakes With 10+ Years of Data")
+
+iceout_spatial %>%
+  group_by(DOW) %>%
+  count() %>%
+  filter(n >= 10) %>%
+  ggplot() +
+  geom_bar(aes(x = n), color = "red3",fill = "darksalmon") +
+  xlab("Lakes with this many Ice On Observations") +
+  ylab("Number of Lakes") + 
+  labs(title = "Lakes with Ice-off Records", subtitle = "495 Lakes With 10+ Years of Data")
+
+
 
 ```
 
-```{r map}
+
+```{r map, fig.width= 4, fig.height=3.5}
 states <- map_data("state")
 counties <- map_data("county")
 minnesota <- subset(states, region %in% c("minnesota"))
 
-ggplot() +
+duration_map <- duration_spatial %>%
+  group_by(DOW) %>%
+  add_count() %>%
+  filter(n >= 10) %>%
+  ungroup() %>%
+  distinct(DOW, .keep_all = TRUE) %>%
+  ggplot() +
   geom_polygon(data = minnesota, mapping = aes(x = long, y = lat, group = group),
                color = "black", fill = "gray") +
-  coord_fixed(1.3) +
-  geom_point(data = duration_spatial, aes(x = long, y = lat), alpha = 0.25) +
-  coord_cartesian() +   
-  labs(title = "Spatial Scatterplot of lakes",
+  geom_point(aes(x = long, y = lat, color = n), alpha = 0.5) +
+  scale_color_distiller(palette = "Spectral") +
+  labs(title = "Spatial Scatterplot of Lakes \n With 10+ Years of Ice Duration",
        x = "Latitude",
-       y = "Longitude")
-```
-```{r}
-plot_lake <- function(input_DOW){
-  ice_data %>%
-    dplyr::filter(DOW == input_DOW) %>%
-    ggplot(aes(x = winter_year, y = duration)) +
-    geom_point() +
-    geom_smooth(method = 'lm', se = TRUE) +
-    theme(legend.position = "none")
-}
+       y = "Longitude", colour = "Number of Observations") + 
+  theme_classic() + 
+  theme(plot.title = element_text(hjust = 0.5), plot.subtitle = element_text(hjust = 0.5))
+duration_map
 
-plot_lake("31055400")
+
+icein_map <- icein_spatial %>%
+  group_by(DOW) %>%
+  add_count() %>%
+  filter(n >= 10) %>%
+  ungroup() %>%
+  distinct(DOW, .keep_all = TRUE) %>%
+  ggplot() +
+  geom_polygon(data = minnesota, mapping = aes(x = long, y = lat, group = group),
+               color = "black", fill = "gray") +
+  geom_point(aes(x = long, y = lat, color = n), alpha = 0.5) +
+  coord_cartesian() + 
+  scale_color_distiller(palette = "Spectral") +
+  labs(title = "Spatial Scatterplot of Lakes \n With 10+ Years of Ice On Dates",
+       x = "Latitude",
+       y = "Longitude", colour = "Number of Observations") + 
+  theme_classic() + 
+  theme(plot.title = element_text(hjust = 0.5), plot.subtitle = element_text(hjust = 0.5))
+icein_map
+
+
+iceout_map <- iceout_spatial %>%
+  group_by(DOW) %>%
+  add_count() %>%
+  filter(n >= 10) %>%
+  ungroup() %>%
+  distinct(DOW, .keep_all = TRUE) %>%
+  ggplot() +
+  geom_polygon(data = minnesota, mapping = aes(x = long, y = lat, group = group),
+               color = "black", fill = "gray") +
+  geom_point(aes(x = long, y = lat, color = n), alpha = 0.5) +
+  coord_cartesian() + 
+  scale_color_distiller(palette = "Spectral") +
+  labs(title = "Spatial Scatterplot of Lakes \n With 10+ Years of Ice Off Dates",
+       x = "Latitude",
+       y = "Longitude", colour = "Number of Observations") + 
+  theme_classic() + 
+  theme(plot.title = element_text(hjust = 0.5), plot.subtitle = element_text(hjust = 0.5))
+iceout_map
+#ggsave("iceoff_map.png", width = 9, height = 7)
+```
+
+
+```{r}
+#takes in a ID (DOW) and prints a ggplot of the lakes ice duration
+# might be cool if we make it interactive and users can plot their own lake
+plot_lake <- function(input_DOW, lm = TRUE) {
+  if (input_DOW %in% fixlakeid(ice_data$DOW)) { 
+    lake <- ice_data %>%
+        dplyr::filter(DOW == input_DOW)
+    if (lm == TRUE & nrow(lake) > 5) {
+      
+      basic_model <- lm(duration ~ year_out, data = lake)
+      mod_sum <- summary(basic_model)
+      coef <- coef(basic_model)[["year_out"]]
+      
+      lake %>%
+        ggplot(aes(x = year_out, y = duration)) +
+        geom_point(color = "blue", size = 3) +
+        geom_abline(slope = coef(basic_model)[["year_out"]], 
+              intercept = coef(basic_model)[["(Intercept)"]], 
+              size = 1.5, colour = "black") +
+        ylab("Ice Duration ") +
+        xlab("Year") +
+        labs(title = "Change In Ice Cover Over Time",
+             subtitle = paste("Ice duration is changing by ", signif(coef * 10, digits = 2), 
+                              " days per decade")) +
+        theme_classic() + theme(plot.title = element_text(hjust = 0.5),
+                                plot.subtitle = element_text(hjust = 0.5))
+    }#if lm 
+    else{ print("Not enough observations to have a linear model :(")}
+    
+  else {
+      ice_data %>%
+        dplyr::filter(DOW == input_DOW) %>%
+        ggplot(aes(x = winter_year, y = duration)) +
+        geom_point(color = "blue", size = 3) +
+        ylab("Ice Duration") +
+        xlab("Year") +
+        labs(title = "Ice Duration Over Time") +
+        theme(legend.position = 'right') + 
+        theme_classic() + theme(plot.title = element_text(hjust = 0.5),
+                                plot.subtitle = element_text(hjust = 0.5))
+    }
+    
+  }#if dow
+  else {print("DOW not in the database")}
+}#funct
+
+
 ```
 
 
 ```{r duration}
-duration_model_df <- duration_spatial %>%
-  filter(DOW %in% observations$DOW) %>%
-  filter(year_out > 1947) %>%
-  mutate(DOW = as.factor(DOW),
-         DOW_CDOM_Ecoregion = as.factor(DOW_CDOM_Ecoregion),
-         log_acres = log(acres))
 
-duration_lm <- lm(duration ~ winter_year + log_acres + shore_mi + max_depth + 
+duration_lm <- lm(duration ~ winter_year + log_acres + shore_mi + max_depth + US_L3NAME +
            ENSO + QBO + SUN + ENSOw + QBOw + SUNw, data = duration_model_df)
 summary(duration_lm)
 
-duration_re <- lmer(duration ~ winter_year + log_acres + log(shore_mi) + max_depth + 
-           ENSO + QBO + SUN + ENSOw + QBOw + SUNw + (1|DOW), data = duration_model_df)
+duration_re <- lmer(duration ~ winter_year + max_depth + 
+           US_L3NAME + ENSOw + QBOw + SUNw + (1|DOW), data = duration_model_df)
 summary(duration_re)
 r.squaredGLMM(duration_re)
 #plot(allEffects(duration_re, partial.residuals = TRUE))
@@ -104,12 +262,18 @@ r.squaredGLMM(duration_re)
 
 
 ```{r}
-gam_duration <- mgcv::bam(duration ~ s(winter_year, k=4)  + s(DOW, bs = 're') + 
-                                              s(log_acres, k=3) +
-                                              s(ENSOw, k=3) + s(QBOw, k=3) +
-                                              s(SUNw, k=3),
-                                            data = duration_model_df,
-                                            select = TRUE)
+# this is what I have for modeling so far, it takes a while to run 
+# but I have got things set up at a decent point
+gam_duration <- mgcv::bam(duration ~ US_L3NAME + #regional means 
+                            s(winter_year, DOW, bs = "fs", k = 5) + #lake specific trends
+                            s(winter_year, by = US_L3NAME) + #region specific trends
+                            s(log_acres, k=3) + # log(lake area)
+                            s(ENSOw, k=5) + s(QBOw, k=5) + s(SUNw, k=5), #climate indices
+                          data = duration_model_df,
+                          method = "REML",
+                          select = TRUE)
+appraise(gam_duration, method = "simulate") # model diagnostics
+k.check(gam_duration) # check basis size
 summary(gam_duration)
 draw(gam_duration)
 deriv_ex <- derivatives(gam_duration, term = "winter_year", interval = "simultaneous", partial_match = TRUE)
@@ -137,4 +301,64 @@ ggplot(data = deriv_ex,
   theme_classic() + theme(axis.title.x = element_blank())
 ```
 
+```{r duration_pred}
+### Posterior simulation to estimate uncertainty in averages and difference in averages ###
+new.data <- data.frame(winter_year=c(1949:1953, 2016:2020), DOW = "10005900", 
+                       US_L3NAME = "North Central Hardwood Forests", ENSOw = 0.1042209, 
+                       QBOw = -2.493601, SUNw = 1238.828, log_acres = 6.239939)
+## 10000 replicate param. vectors
+set.seed(3)
+br <- rmvn(10000,coef(gam_duration),gam_duration$Vp) 
 
+pred1 <- predict.gam(gam_duration, newdata=new.data, se.fit=TRUE, 
+                     exclude=c("s(DOW)"), type="response")
+Xp <- predict.gam(gam_duration, newdata=new.data,  exclude=c("s(DOW)"), type="lpmatrix") 
+
+res <- rep(0,10000)
+early.avg <- rep(0,10000)
+late.avg <- rep(0,10000)
+
+for (i in 1:10000){ 
+  pr <- Xp %*% br[i,] ## replicate predictions
+  early.avg[i] <- mean(pr[1:5])
+  late.avg[i] <- mean(pr[6:10])
+  res[i] <- early.avg[i]-late.avg[i] 
+}
+
+# 95% confidence interval for 1949-1953 average
+mean(pred1$fit[1:5])  
+# 160.6657
+(mean(pred1$fit[1:5]) ) + c(-1.96, 1.96)*sqrt(var(early.avg)) # 95% CI of difference 
+# [1] 155.6682 165.6632
+quantile(early.avg, c(.025, .975))
+# 155.6862 165.6316 
+
+# 95% confidence interval for 2014-2018 average
+mean(pred1$fit[6:10])  
+# 150.7757
+(mean(pred1$fit[6:10]) ) +c(-1.96, 1.96)*sqrt(var(late.avg)) # 95% CI of difference 
+# [1] 149.0804 156.8380
+quantile(late.avg, c(.025, .975))
+# 146.8637 154.6878
+
+# 95% confidence interval for difference between 1949-1953 and 2014-2018
+mean(pred1$fit[1:5]) - mean(pred1$fit[6:10]) 
+# 9.890004
+(mean(pred1$fit[1:5]) - mean(pred1$fit[6:10])) +c(-1.96, 1.96)*sqrt(var(res)) # 95% CI of difference 
+# [1] 5.499398 14.280610
+quantile(res, c(.025, .975))
+# 5.507058 14.317520
+```
+
+
+```{r model_testing}
+gam_duration <- mgcv::bam(duration ~ US_L3NAME + #regional means 
+                            s(winter_year, k= 4)+ # DOW, bs = "fs", k = 5), #lake specific trends
+                            s(lat, long),
+                          data = duration_model_df,
+                          select = TRUE)
+appraise(gam_duration, method = "simulate") # model diagnostics
+k.check(gam_duration) # check basis size
+summary(gam_duration)
+draw(gam_duration, select = 1)
+```
