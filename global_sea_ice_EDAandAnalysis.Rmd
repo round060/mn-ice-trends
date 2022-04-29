@@ -1,0 +1,59 @@
+---
+title: "Global Sea Ice EDA and Analysis"
+author: "Jack Rabe"
+date: "4/28/2022"
+output: 
+  github_document:
+    toc: true
+    toc_depth: 3
+  
+---
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(lubridate)
+library(gt)
+library(paletteer)
+library(ggridges)
+library(plotly)
+library(sf)
+library(ggmap)
+library(tidycensus)
+library(leaflet)
+library(osmdata)
+library(tigris)
+library(ggsflabel)
+library(ggthemes)
+library(flexdashboard)
+library(scales)
+
+#Working directory for .RMD
+knitr::opts_knit$set(echo = TRUE,
+                     root.dir = rprojroot::find_rstudio_root_file())
+
+#Controlling figure output in markdown
+knitr::opts_chunk$set(
+#  fig.height =   
+  fig.width = 6,
+#  fig.asp = .5,
+  out.width = "90%",
+#  out.height = 
+ fig.align  = "center",
+  cache = FALSE,
+  eval  = TRUE,
+  echo  = TRUE,
+  warning = FALSE
+)
+
+#My Colours (from viridis)
+my_purple <- "#440154FF"
+my_yellow <- "#FDE725FF"
+
+#Set Theme for ggplot2
+theme_set(theme_bw() + theme(plot.title = element_text(hjust = 0.5), legend.position = "bottom"))
+
+#Set Scientific notation output and decimal places for knitr
+options(scipen = 999)
+options(digits = 4)
+options(dplyr.summarise.inform = FALSE)
+```
